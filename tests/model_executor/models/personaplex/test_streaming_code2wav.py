@@ -208,12 +208,34 @@ def _audio(output) -> torch.Tensor:
     return output.multimodal_outputs["model_outputs"][0]
 
 
-@pytest.mark.parametrize("second_codes", [_codes(3), _codes(1, start=100)])
-def test_resumable_codes_emit_only_new_pcm(second_codes: torch.Tensor) -> None:
+def test_delta_codes_skip_cpu_history(mocker) -> None:
+    model, _ = _model()
+    chunks = [_codes(1, start=frame) for frame in range(1000)]
+    decode = mocker.patch.object(
+        model,
+        "_decode_streaming_frames",
+        return_value=torch.empty(0),
+    )
+    cat = mocker.spy(personaplex_code2wav.torch, "cat")
+    equal = mocker.spy(personaplex_code2wav.torch, "equal")
+
+    try:
+        for chunk in chunks:
+            model(input_ids=chunk, request_ids=["req"])
+    finally:
+        model.on_requests_finished({"req"})
+
+    assert decode.call_count == 1000
+    assert all(call.args[1].shape == (2, 1) for call in decode.call_args_list)
+    assert cat.call_count == 0
+    assert equal.call_count == 0
+
+
+def test_resumable_delta_codes_emit_only_new_pcm() -> None:
     model, mimi = _model()
 
     first = model(input_ids=_codes(2), request_ids=["req"])
-    second = model(input_ids=second_codes, request_ids=["req"])
+    second = model(input_ids=_codes(1, start=100), request_ids=["req"])
 
     assert _audio(first).numel() == 8
     assert _audio(second).numel() == 4
@@ -276,9 +298,10 @@ def test_request_id_falls_back_to_runtime_information() -> None:
     info = [{"request_id": "runtime-req"}]
 
     model(input_ids=_codes(2), runtime_additional_information=info)
-    second = model(input_ids=_codes(3), runtime_additional_information=info)
+    second = model(input_ids=_codes(1, start=100), runtime_additional_information=info)
 
     assert _audio(second).numel() == 4
+    assert model._request_codec_slots == {"runtime-req": 0}
 
 
 def test_decoder_slot_lifecycle_isolated_capacity_and_reuse() -> None:
