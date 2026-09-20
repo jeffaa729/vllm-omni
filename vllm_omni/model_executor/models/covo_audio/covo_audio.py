@@ -186,7 +186,11 @@ class CovoAudioMultiModalProcessor(OmniMultiModalProcessor[CovoAudioProcessingIn
             )
 
         return [
-            PromptReplacement("audio", "<|cAUDIO|>", get_replacement),
+            PromptReplacement(
+                modality="audio",
+                target=[audio_token_id],
+                replacement=get_replacement,
+            ),
         ]
 
 
