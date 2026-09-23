@@ -747,8 +747,33 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
     def _run_generated_input_local_transformer(self, input_embeds: torch.Tensor) -> torch.Tensor:
         manager = self.input_local_transformer_cudagraph_manager
         if manager is not None and manager.is_captured():
-            outputs = manager.execute({MIMO_INPUT_LOCAL_CUDAGRAPH_INPUT_KEY: input_embeds})
-            return torch.cat(outputs, dim=0).reshape_as(input_embeds)
+            inputs = {MIMO_INPUT_LOCAL_CUDAGRAPH_INPUT_KEY: input_embeds}
+            errors: list[float] = getattr(self, "_mimo_parity_max_errors", [])
+            hits_before = getattr(manager, "graph_hits", None) if len(errors) < 8 else None
+            outputs = manager.execute(inputs)
+            graph_output = torch.cat(outputs, dim=0).reshape_as(input_embeds)
+
+            # Temporary dev-branch evidence: compare eight real graph replays
+            # with the eager encoder on the exact same generated embeddings.
+            if hits_before is not None and manager.graph_hits > hits_before:
+                eager_output = self.encoder_eager_forward(inputs).reshape_as(input_embeds)
+                max_error = (graph_output.float() - eager_output.float()).abs().max().item()
+                errors.append(max_error)
+                self._mimo_parity_max_errors = errors
+                logger.info(
+                    "MIMO_PARITY item=%d shape=%s max_abs_error=%g",
+                    len(errors),
+                    tuple(input_embeds.shape),
+                    max_error,
+                )
+                if len(errors) == 8:
+                    logger.info(
+                        "MIMO_PARITY summary items=8 max_abs_error=%g mean_item_max_abs_error=%g",
+                        max(errors),
+                        sum(errors) / len(errors),
+                    )
+
+            return graph_output
 
         return self.encoder_eager_forward({MIMO_INPUT_LOCAL_CUDAGRAPH_INPUT_KEY: input_embeds}).reshape_as(input_embeds)
 
