@@ -54,6 +54,53 @@ def _model():
 
 
 @pytest.mark.cpu
+def test_stage0_model_exposes_nested_encoder_cudagraph_to_runner() -> None:
+    from vllm.model_executor.models.interfaces import supports_encoder_cudagraph
+
+    from vllm_omni.model_executor.models.mimo_audio.mimo_audio import MiMoAudioForConditionalGeneration
+    from vllm_omni.worker.gpu_model_runner import OmniGPUModelRunner
+
+    inner = _model()
+    outer = object.__new__(MiMoAudioForConditionalGeneration)
+    nn.Module.__init__(outer)
+    outer.fused_thinker_talker = inner
+
+    assert supports_encoder_cudagraph(outer)
+
+    config = SimpleNamespace(
+        compilation_config=SimpleNamespace(
+            cudagraph_mm_encoder=True,
+            encoder_cudagraph_token_budgets=[2, 8],
+            encoder_cudagraph_max_vision_items_per_batch=1,
+            encoder_cudagraph_max_frames_per_batch=0,
+        ),
+        model_config=SimpleNamespace(
+            multimodal_config=SimpleNamespace(
+                get_limit_per_prompt=lambda _modality: 0,
+                mm_encoder_tp_mode="weights",
+            )
+        ),
+        parallel_config=SimpleNamespace(tensor_parallel_size=1),
+        scheduler_config=SimpleNamespace(max_num_seqs=4),
+    )
+    runner = object.__new__(OmniGPUModelRunner)
+    runner.compilation_config = config.compilation_config
+    runner.supports_mm_inputs = True
+    runner.vllm_config = config
+    runner.device = torch.device("cpu")
+    runner.dtype = torch.float32
+    runner.model = outer
+    runner.encoder_cudagraph_manager = None
+    runner._maybe_init_encoder_cudagraph_manager()
+
+    manager = runner.encoder_cudagraph_manager
+    assert manager is not None
+    assert manager.model is outer
+    assert inner.input_local_transformer_cudagraph_manager is manager
+    assert manager.token_budgets == [2, 8]
+
+
+@pytest.mark.cpu
 def test_input_local_transformer_encoder_cudagraph_protocol() -> None:
     pytest.importorskip("vllm.v1.worker.encoder_cudagraph_defs")
     from vllm.model_executor.models.interfaces import supports_encoder_cudagraph
