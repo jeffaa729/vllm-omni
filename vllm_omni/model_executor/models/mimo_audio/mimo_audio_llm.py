@@ -6,7 +6,7 @@ import logging
 import threading
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 import torch.nn as nn
@@ -20,7 +20,12 @@ from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader, maybe_remap_kv_scale_name
-from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from vllm.model_executor.models.qwen2_audio import (
     Qwen2AudioFeatureInputs,
     Qwen2AudioMultiModalDataParser,
@@ -68,9 +73,13 @@ from vllm_omni.platforms import current_omni_platform
 
 logger = logging.getLogger(__name__)
 
-# CUDA Graph buckets for MiMo local decoding / input_local_transformer.
+if TYPE_CHECKING:
+    from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+
+# CUDA Graph buckets for MiMo local decoding.
 # We keep the list small to balance warmup time and runtime coverage.
 MIMO_CUDAGRAPH_BATCH_SIZES: tuple[int, ...] = (1, 2, 4, 6, 8, 16, 32, 64, 128)
+MIMO_INPUT_LOCAL_CUDAGRAPH_INPUT_KEY = "input_local_embeds"
 
 
 @dataclass
@@ -263,79 +272,6 @@ class MiMoLocalDecodeCudaGraph:
             return self.output_tensor[:b].clone()
 
 
-class MiMoInputLocalTransformerBuffer:
-    def __init__(self, model: "MiMoAudioLLMForConditionalGeneration", max_batch_size: int) -> None:
-        self.max_batch_size = max_batch_size
-
-        device = next(model.input_local_transformer.parameters()).device
-        dtype = next(model.input_local_transformer.parameters()).dtype
-        hidden_size = model.input_local_config.hidden_size
-        group_size = model.group_size
-
-        self.input_tensor = torch.zeros((max_batch_size, group_size, hidden_size), dtype=dtype, device=device)
-        self.lock = threading.Lock()
-
-    def inputs(self, batch_size: int) -> torch.Tensor:
-        return self.input_tensor[:batch_size]
-
-    def prepare(self, input_tensor: torch.Tensor) -> None:
-        b = int(input_tensor.shape[0])
-        assert b <= self.max_batch_size, f"Expected batch size <= {self.max_batch_size}, got {b}"
-
-        if input_tensor.shape != self.input_tensor[:b].shape:
-            input_tensor = input_tensor.reshape(self.input_tensor[:b].shape)
-        self.input_tensor[:b].copy_(input_tensor)
-
-        # Sanitize tail for fixed-bucket replay.
-        if b < self.max_batch_size:
-            self.input_tensor[b : self.max_batch_size].zero_()
-
-
-class MiMoInputLocalTransformerCudaGraph:
-    def __init__(
-        self,
-        cuda_graph: torch.cuda.CUDAGraph,
-        buffer: MiMoInputLocalTransformerBuffer,
-        output_tensor: torch.Tensor,
-        batch_size: int,
-    ) -> None:
-        self.cuda_graph = cuda_graph
-        self.buffer = buffer
-        self.output_tensor = output_tensor
-        self.batch_size = batch_size
-
-    @classmethod
-    def capture(
-        cls,
-        model: "MiMoAudioLLMForConditionalGeneration",
-        buffer: MiMoInputLocalTransformerBuffer,
-        batch_size: int,
-        eager_run_first: bool = True,
-    ) -> "MiMoInputLocalTransformerCudaGraph":
-        input_tensor = buffer.inputs(batch_size)
-
-        cuda_graph = torch.cuda.CUDAGraph()
-        if eager_run_first:
-            out = model.input_local_transformer(inputs_embeds=input_tensor, return_dict=True, is_causal=False)
-            _ = out.last_hidden_state
-
-        with torch.cuda.graph(cuda_graph, pool=current_platform.get_global_graph_pool()):
-            out = model.input_local_transformer(inputs_embeds=input_tensor, return_dict=True, is_causal=False)
-            output_tensor = out.last_hidden_state
-
-        return cls(cuda_graph=cuda_graph, buffer=buffer, output_tensor=output_tensor, batch_size=batch_size)
-
-    def forward(self, input_embeds: torch.Tensor) -> torch.Tensor:
-        b = int(input_embeds.shape[0])
-        assert b <= self.batch_size, f"Expected batch size <= {self.batch_size}, got {b}"
-        with self.buffer.lock:
-            self.buffer.prepare(input_embeds)
-            self.cuda_graph.replay()
-            if b == self.batch_size:
-                return self.output_tensor.clone()
-            return self.output_tensor[:b].clone()
-
-
 class MiMoAudioQwen2Model(TransformerQwen2Model):
     def __init__(self, config: Qwen2Config):
         super().__init__(config)
@@ -485,7 +421,7 @@ class MimoAudioMultiModalProcessor(BaseMultiModalProcessor[MimoAudioProcessingIn
 @MULTIMODAL_REGISTRY.register_processor(
     MimoAudioMultiModalProcessor, info=MimoAudioProcessingInfo, dummy_inputs=MimoAudioDummyInputsBuilder
 )
-class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsEncoderCudaGraph, SupportsPP):
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
@@ -602,6 +538,7 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         self.input_local_config = config.input_local_config()
         self.input_local_transformer = MiMoAudioQwen2Model(self.input_local_config)
         self.input_local_transformer.embed_tokens = None
+        self.input_local_transformer_cudagraph_manager: EncoderCudaGraphManager | None = None
 
         ###other parts
 
@@ -692,31 +629,128 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
             self.local_forward_cg_by_bs.clear()
             self.local_forward_buf_by_bs.clear()
 
-        # CUDA Graph cache for input_local_transformer (re-encode grouped RVQ embeddings).
-        self.input_local_transformer_cg_by_bs: dict[int, MiMoInputLocalTransformerCudaGraph] = {}
-        self.input_local_transformer_buf_by_bs: dict[int, MiMoInputLocalTransformerBuffer] = {}
-        try:
-            if torch.cuda.is_available() and next(self.input_local_transformer.parameters()).device.type == "cuda":
-                for bs in MIMO_CUDAGRAPH_BATCH_SIZES:
-                    try:
-                        buf = MiMoInputLocalTransformerBuffer(self, max_batch_size=bs)
-                        cg = MiMoInputLocalTransformerCudaGraph.capture(self, buf, batch_size=bs)
-                        self.input_local_transformer_buf_by_bs[bs] = buf
-                        self.input_local_transformer_cg_by_bs[bs] = cg
-                        logger.info(f"Captured input_local_transformer CUDA graph (batch_size={bs}).")
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to capture input_local_transformer CUDA graph (batch_size={bs}): {e}. "
-                            "Skip this bucket."
-                        )
-                if not self.input_local_transformer_cg_by_bs:
-                    logger.info("No input_local_transformer CUDA graph buckets captured; falling back to eager path.")
-            else:
-                logger.info("CUDA not available or model not on CUDA; skip input_local_transformer CUDA graph capture.")
-        except Exception as e:
-            logger.warning(f"Failed to init input_local_transformer CUDA graph cache: {e}. Falling back to eager path.")
-            self.input_local_transformer_cg_by_bs.clear()
-            self.input_local_transformer_buf_by_bs.clear()
+    # -- SupportsEncoderCudaGraph protocol methods --
+
+    supports_encoder_cudagraph: Literal[True] = True
+
+    def set_input_local_transformer_cudagraph_manager(
+        self,
+        manager: "EncoderCudaGraphManager | None",
+    ) -> None:
+        self.input_local_transformer_cudagraph_manager = manager
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        return EncoderCudaGraphConfig(
+            # This graph is invoked inside MiMo's forward, not for an external
+            # multimodal item dispatched by the runner.
+            modalities=[],
+            buffer_keys=[MIMO_INPUT_LOCAL_CUDAGRAPH_INPUT_KEY],
+            out_hidden_size=self.input_local_config.hidden_size,
+        )
+
+    def get_encoder_cudagraph_budget_range(self, vllm_config: VllmConfig) -> tuple[int, int]:
+        max_items = min(
+            vllm_config.scheduler_config.max_num_seqs,
+            max(MIMO_CUDAGRAPH_BATCH_SIZES),
+        )
+        return self.group_size, self.group_size * max(1, max_items)
+
+    def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        input_embeds = mm_kwargs[MIMO_INPUT_LOCAL_CUDAGRAPH_INPUT_KEY]
+        # Treat one transformer invocation as one variable-length item.
+        # This makes token budgets map directly to the old batch buckets.
+        num_tokens = int(input_embeds.shape[0]) * self.group_size
+        return [EncoderItemSpec(input_size=num_tokens, output_tokens=num_tokens)]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        input_embeds = mm_kwargs[MIMO_INPUT_LOCAL_CUDAGRAPH_INPUT_KEY]
+        if not indices:
+            selected = input_embeds[:0]
+        elif indices == [0]:
+            selected = input_embeds
+        else:
+            raise ValueError(f"Expected aggregate MiMo item index [0], got {indices}")
+        return {MIMO_INPUT_LOCAL_CUDAGRAPH_INPUT_KEY: selected}
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphCaptureInputs
+
+        del max_batch_size, max_frames_per_batch
+        if path != "default":
+            raise ValueError(f"Unsupported MiMo encoder CUDA graph path: {path}")
+        if token_budget < self.group_size or token_budget % self.group_size != 0:
+            raise ValueError(
+                f"MiMo encoder CUDA graph budget {token_budget} must be a positive multiple "
+                f"of group size {self.group_size}"
+            )
+        num_groups = token_budget // self.group_size
+        input_embeds = torch.zeros(
+            (num_groups, self.group_size, self.input_local_config.hidden_size),
+            device=device,
+            dtype=dtype,
+        )
+        return EncoderCudaGraphCaptureInputs(values={MIMO_INPUT_LOCAL_CUDAGRAPH_INPUT_KEY: input_embeds})
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
+
+        del max_batch_size, max_frames_per_batch
+        if path != "default":
+            raise ValueError(f"Unsupported MiMo encoder CUDA graph path: {path}")
+        return EncoderCudaGraphReplayBuffers(
+            values={MIMO_INPUT_LOCAL_CUDAGRAPH_INPUT_KEY: mm_kwargs[MIMO_INPUT_LOCAL_CUDAGRAPH_INPUT_KEY]}
+        )
+
+    def encoder_cudagraph_forward(
+        self,
+        inputs: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        if path != "default":
+            raise ValueError(f"Unsupported MiMo encoder CUDA graph path: {path}")
+        output = self.input_local_transformer(
+            inputs_embeds=inputs[MIMO_INPUT_LOCAL_CUDAGRAPH_INPUT_KEY],
+            return_dict=True,
+            is_causal=False,
+        )
+        return output.last_hidden_state.flatten(0, 1)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        return self.encoder_cudagraph_forward(mm_kwargs, path=path)
+
+    def _run_generated_input_local_transformer(self, input_embeds: torch.Tensor) -> torch.Tensor:
+        manager = self.input_local_transformer_cudagraph_manager
+        if manager is not None and manager.is_captured():
+            outputs = manager.execute({MIMO_INPUT_LOCAL_CUDAGRAPH_INPUT_KEY: input_embeds})
+            return torch.cat(outputs, dim=0).reshape_as(input_embeds)
+
+        return self.encoder_eager_forward({MIMO_INPUT_LOCAL_CUDAGRAPH_INPUT_KEY: input_embeds}).reshape_as(input_embeds)
 
     def _validate_and_reshape_mm_tensor(self, mm_input: object, name: str) -> torch.Tensor:
         if not isinstance(mm_input, (torch.Tensor, list)):
@@ -1074,24 +1108,7 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
             new_audio_emb += cur_speech_embeds
 
         input_local_in = new_audio_emb.reshape(B * T_groups, group_size, hidden_size)
-        use_cg = bool(self.input_local_transformer_cg_by_bs)
-        new_audio_emb_last_hidden: torch.Tensor
-        if use_cg:
-            bt = int(input_local_in.shape[0])
-            chosen_bs = None
-            for bs in MIMO_CUDAGRAPH_BATCH_SIZES:
-                if bs >= bt and bs in self.input_local_transformer_cg_by_bs:
-                    chosen_bs = bs
-                    break
-            if chosen_bs is not None:
-                logger.debug(f"Using CUDA graph for input_local_transformer (b={bt}, bucket={chosen_bs}).")
-                new_audio_emb_last_hidden = self.input_local_transformer_cg_by_bs[chosen_bs].forward(input_local_in)
-            else:
-                use_cg = False
-
-        if not use_cg:
-            out = self.input_local_transformer(inputs_embeds=input_local_in, return_dict=True, is_causal=False)
-            new_audio_emb_last_hidden = out.last_hidden_state
+        new_audio_emb_last_hidden = self._run_generated_input_local_transformer(input_local_in)
 
         new_audio_emb_last = new_audio_emb_last_hidden.reshape(B, T_groups, group_size, hidden_size)
 

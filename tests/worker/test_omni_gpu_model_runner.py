@@ -1030,3 +1030,47 @@ def test_preprocess_one_token_chunked_prefill_tail_then_decode(monkeypatch, batc
         assert route == ("batch" if batched_decode and not is_prefill else "normal")
         torch.testing.assert_close(embeds, torch.full((1, 4), 42.0 if is_prefill else 43.0))
         assert ("codes" in runner.model_intermediate_buffer["r"]) == (not is_prefill)
+
+
+def test_maybe_init_encoder_cudagraph_manager_attaches_to_mimo(monkeypatch):
+    manager = object()
+    attached: list[object] = []
+    model = SimpleNamespace(
+        set_input_local_transformer_cudagraph_manager=attached.append,
+    )
+    runner = object.__new__(OmniGPUModelRunner)
+    runner.get_model = lambda: model
+
+    def _parent_init(self):
+        self.encoder_cudagraph_manager = manager
+
+    monkeypatch.setattr(
+        GPUModelRunner,
+        "_maybe_init_encoder_cudagraph_manager",
+        _parent_init,
+        raising=False,
+    )
+
+    OmniGPUModelRunner._maybe_init_encoder_cudagraph_manager(runner)
+
+    assert attached == [manager]
+
+
+def test_maybe_init_encoder_cudagraph_manager_ignores_models_without_setter(
+    monkeypatch,
+):
+    manager = object()
+    runner = object.__new__(OmniGPUModelRunner)
+    runner.get_model = lambda: SimpleNamespace()
+
+    def _parent_init(self):
+        self.encoder_cudagraph_manager = manager
+
+    monkeypatch.setattr(
+        GPUModelRunner,
+        "_maybe_init_encoder_cudagraph_manager",
+        _parent_init,
+        raising=False,
+    )
+
+    OmniGPUModelRunner._maybe_init_encoder_cudagraph_manager(runner)

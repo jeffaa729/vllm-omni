@@ -99,6 +99,13 @@ class OmniGPUModelRunner(PrefixCacheRunnerMixin, GPUModelRunner):
         # policy counterpart lives on PrefixCacheRunnerMixin.
         self._pooler_payload_include_hidden_flag = True
 
+    def _maybe_init_encoder_cudagraph_manager(self) -> None:
+        super()._maybe_init_encoder_cudagraph_manager()
+        raw_model = self.get_model()
+        setter = getattr(raw_model, "set_input_local_transformer_cudagraph_manager", None)
+        if callable(setter):
+            setter(self.encoder_cudagraph_manager)
+
     def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
         override_fn = self._sampled_token_ids_cpu_override
         if callable(override_fn):
