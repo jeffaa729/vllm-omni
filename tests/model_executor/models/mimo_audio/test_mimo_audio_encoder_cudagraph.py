@@ -205,6 +205,40 @@ def test_input_local_transformer_uses_attached_manager() -> None:
     assert model.input_local_transformer.call_count == 0
 
 
+@pytest.mark.cpu
+def test_parity_probe_counts_distinct_valid_requests_only() -> None:
+    input_key, _ = _mimo_llm_deps()
+    model = _model()
+    model.speech_group_downcast = nn.Linear(6, 3, bias=False)
+    inputs = torch.arange(6, dtype=torch.float32).reshape(1, 2, 3)
+
+    class _Manager:
+        def __init__(self) -> None:
+            self.graph_hits = 0
+
+        def is_captured(self) -> bool:
+            return True
+
+        def execute(self, mm_kwargs):
+            self.graph_hits += 1
+            return [mm_kwargs[input_key].flatten(0, 1) + 1]
+
+    manager = _Manager()
+    model.set_input_local_transformer_cudagraph_manager(manager)
+
+    for request_id, valid in (("first", True), ("first", True), ("ignored", False), ("second", True)):
+        output = model._run_generated_input_local_transformer(
+            inputs,
+            request_ids=[request_id],
+            valid_mask=[valid],
+        )
+        torch.testing.assert_close(output, inputs + 1)
+
+    assert manager.graph_hits == 4
+    assert model.input_local_transformer.call_count == 2
+    assert model._mimo_parity_errors == {"first": (0.0, 0.0), "second": (0.0, 0.0)}
+
+
 @pytest.mark.cuda
 def test_input_local_transformer_manager_matches_eager_across_budget_tiers() -> None:
     pytest.importorskip("vllm.v1.worker.encoder_cudagraph")

@@ -744,33 +744,60 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
     ) -> torch.Tensor:
         return self.encoder_cudagraph_forward(mm_kwargs, path=path)
 
-    def _run_generated_input_local_transformer(self, input_embeds: torch.Tensor) -> torch.Tensor:
+    def _run_generated_input_local_transformer(
+        self,
+        input_embeds: torch.Tensor,
+        request_ids: list[str] | None = None,
+        valid_mask: list[bool] | None = None,
+    ) -> torch.Tensor:
         manager = self.input_local_transformer_cudagraph_manager
         if manager is not None and manager.is_captured():
             inputs = {MIMO_INPUT_LOCAL_CUDAGRAPH_INPUT_KEY: input_embeds}
-            errors: list[float] = getattr(self, "_mimo_parity_max_errors", [])
-            hits_before = getattr(manager, "graph_hits", None) if len(errors) < 8 else None
+            errors: dict[str, tuple[float, float]] = getattr(self, "_mimo_parity_errors", {})
+            pending: list[tuple[int, str]] = []
+            if request_ids is not None and len(errors) < 8:
+                pending = [
+                    (index, request_id)
+                    for index, request_id in enumerate(request_ids)
+                    if (valid_mask is None or valid_mask[index]) and request_id not in errors
+                ][: 8 - len(errors)]
+            hits_before = getattr(manager, "graph_hits", None) if pending else None
             outputs = manager.execute(inputs)
             graph_output = torch.cat(outputs, dim=0).reshape_as(input_embeds)
 
-            # Temporary dev-branch evidence: compare eight real graph replays
-            # with the eager encoder on the exact same generated embeddings.
-            if hits_before is not None and manager.graph_hits > hits_before:
+            # Temporary dev-branch evidence: compare one graph replay per
+            # distinct real request with eager on the same generated input.
+            if request_ids is not None and hits_before is not None and manager.graph_hits > hits_before:
                 eager_output = self.encoder_eager_forward(inputs).reshape_as(input_embeds)
-                max_error = (graph_output.float() - eager_output.float()).abs().max().item()
-                errors.append(max_error)
-                self._mimo_parity_max_errors = errors
-                logger.info(
-                    "MIMO_PARITY item=%d shape=%s max_abs_error=%g",
-                    len(errors),
-                    tuple(input_embeds.shape),
-                    max_error,
-                )
-                if len(errors) == 8:
+                num_requests = len(request_ids)
+                graph_groups = graph_output.reshape(num_requests, -1, self.group_size, graph_output.shape[-1])
+                eager_groups = eager_output.reshape_as(graph_groups)
+                graph_feedback = self.speech_group_downcast(graph_groups.flatten(2))
+                eager_feedback = self.speech_group_downcast(eager_groups.flatten(2))
+                for index, request_id in pending:
+                    local_error = (graph_groups[index].float() - eager_groups[index].float()).abs().max().item()
+                    feedback_error = (graph_feedback[index].float() - eager_feedback[index].float()).abs().max().item()
+                    errors[request_id] = (local_error, feedback_error)
                     logger.info(
-                        "MIMO_PARITY summary items=8 max_abs_error=%g mean_item_max_abs_error=%g",
-                        max(errors),
-                        sum(errors) / len(errors),
+                        "MIMO_PARITY request=%s item=%d input_shape=%s local_max_abs_error=%g "
+                        "feedback_max_abs_error=%g",
+                        request_id,
+                        len(errors),
+                        tuple(graph_groups[index].shape),
+                        local_error,
+                        feedback_error,
+                    )
+                self._mimo_parity_errors = errors
+                if len(errors) == 8:
+                    local_errors, feedback_errors = zip(*errors.values())
+                    logger.info(
+                        "MIMO_PARITY summary distinct_requests=8 local_max_abs_error=%g "
+                        "local_mean_item_max_abs_error=%g feedback_max_abs_error=%g "
+                        "feedback_mean_item_max_abs_error=%g",
+                        max(local_errors),
+                        sum(local_errors) / 8,
+                        max(feedback_errors),
+                        sum(feedback_errors) / 8,
                     )
 
             return graph_output
@@ -1103,6 +1130,8 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
     def _generate_speech_tokens_and_audio_embeddings(
         self,
         hidden_states: torch.Tensor,
+        request_ids: list[str],
+        valid_mask: list[bool],
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         B = hidden_states.shape[0]
         next_speech_tokens = None
@@ -1133,7 +1162,11 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
             new_audio_emb += cur_speech_embeds
 
         input_local_in = new_audio_emb.reshape(B * T_groups, group_size, hidden_size)
-        new_audio_emb_last_hidden = self._run_generated_input_local_transformer(input_local_in)
+        new_audio_emb_last_hidden = self._run_generated_input_local_transformer(
+            input_local_in,
+            request_ids=request_ids,
+            valid_mask=valid_mask,
+        )
 
         new_audio_emb_last = new_audio_emb_last_hidden.reshape(B, T_groups, group_size, hidden_size)
 
@@ -1218,7 +1251,9 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
 
                 batch_hs = torch.stack(batch_hs_list, dim=0)
                 batch_next_speech_tokens, batch_new_audio_emb = self._generate_speech_tokens_and_audio_embeddings(
-                    batch_hs
+                    batch_hs,
+                    request_ids=request_ids,
+                    valid_mask=valid_mask,
                 )
 
                 for req_idx, is_valid in enumerate(valid_mask):

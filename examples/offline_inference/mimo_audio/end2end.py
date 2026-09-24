@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """
 This example shows how to use vLLM for running offline inference
 with the correct prompt format on MiMo-Audio-Omni.
@@ -286,7 +286,22 @@ def main(args):
     else:
         raise ValueError(f"Invalid query type: {args.query_type}")
 
-    prompts = [copy.deepcopy(query_result) for _ in range(args.num_prompts)]
+    if args.parity_prompts:
+        if args.query_type != "tts_sft" or args.num_prompts != 8:
+            raise ValueError("--parity-prompts requires --query-type tts_sft --num-prompts 8")
+        texts = [
+            "The weather is nice today.",
+            "Please read this short sentence.",
+            "A small bird sings at dawn.",
+            "We will meet at noon tomorrow.",
+            "The train arrived at the station.",
+            "She opened the blue notebook.",
+            "The garden is quiet after rain.",
+            "Thank you for your help today.",
+        ]
+        prompts = [get_tts_sft(text=sample) for sample in texts]
+    else:
+        prompts = [copy.deepcopy(query_result) for _ in range(args.num_prompts)]
 
     print("prompts", prompts)
     omni_outputs = omni.generate(prompts, sampling_params_list)
@@ -295,6 +310,7 @@ def main(args):
     if args.query_type is not None:
         output_dir = os.path.join(output_dir, args.query_type)
     os.makedirs(output_dir, exist_ok=True)
+    parity_tokens: list[dict[str, object]] = []
 
     for stage_outputs in omni_outputs:
         output = stage_outputs
@@ -302,6 +318,13 @@ def main(args):
             request_id = output.request_id
             text_output = output.outputs[0].text
             # Save aligned text file per request
+            if args.parity_prompts:
+                parity_tokens.append(
+                    {
+                        "prompt": str(output.prompt),
+                        "token_ids": list(output.outputs[0].token_ids),
+                    }
+                )
             prompt_text = output.prompt
             out_txt = os.path.join(output_dir, f"{request_id}.txt")
             lines = []
@@ -338,6 +361,12 @@ def main(args):
             # Save audio file with explicit WAV format
             sf.write(output_wav, audio_numpy, samplerate=24000, format="WAV")
             print(f"Request ID: {request_id}, Audio saved to {output_wav}")
+
+    if args.parity_prompts:
+        if len(parity_tokens) != 8:
+            raise RuntimeError(f"Expected 8 Stage 0 token sequences, got {len(parity_tokens)}")
+        with open(os.path.join(output_dir, "stage0_tokens.json"), "w", encoding="utf-8") as f:
+            json.dump(sorted(parity_tokens, key=lambda item: str(item["prompt"])), f, indent=2)
 
 
 def parse_args():
@@ -428,6 +457,11 @@ def parse_args():
         type=int,
         default=24000,
         help="Sampling rate for audio.",
+    )
+    parser.add_argument(
+        "--parity-prompts",
+        action="store_true",
+        help="Dev-only: run eight distinct TTS prompts and save Stage 0 token IDs.",
     )
     parser.add_argument(
         "--deploy-config",
