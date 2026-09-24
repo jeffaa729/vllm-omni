@@ -3,6 +3,7 @@
 
 # Copyright 2025 Xiaomi Corporation.
 import logging
+import os
 import threading
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -761,7 +762,16 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
                     for index, request_id in enumerate(request_ids)
                     if (valid_mask is None or valid_mask[index]) and request_id not in errors
                 ][: 8 - len(errors)]
-            hits_before = getattr(manager, "graph_hits", None) if pending else None
+            trace_pending = (
+                [
+                    (index, request_id)
+                    for index, request_id in enumerate(request_ids or [])
+                    if valid_mask is None or valid_mask[index]
+                ]
+                if os.environ.get("MIMO_PARITY_TRACE") == "1"
+                else []
+            )
+            hits_before = getattr(manager, "graph_hits", None) if pending or trace_pending else None
             outputs = manager.execute(inputs)
             graph_output = torch.cat(outputs, dim=0).reshape_as(input_embeds)
 
@@ -774,6 +784,16 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
                 eager_groups = eager_output.reshape_as(graph_groups)
                 graph_feedback = self.speech_group_downcast(graph_groups.flatten(2))
                 eager_feedback = self.speech_group_downcast(eager_groups.flatten(2))
+                for index, request_id in trace_pending:
+                    local_error = (graph_groups[index].float() - eager_groups[index].float()).abs().max().item()
+                    feedback_error = (graph_feedback[index].float() - eager_feedback[index].float()).abs().max().item()
+                    logger.info(
+                        "MIMO_STEP_PARITY request=%s step=%d local_max_abs_error=%g feedback_max_abs_error=%g",
+                        request_id,
+                        getattr(self, "_mimo_trace_steps", {}).get(request_id, 0),
+                        local_error,
+                        feedback_error,
+                    )
                 for index, request_id in pending:
                     local_error = (graph_groups[index].float() - eager_groups[index].float()).abs().max().item()
                     feedback_error = (graph_feedback[index].float() - eager_feedback[index].float()).abs().max().item()
@@ -1226,6 +1246,31 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         logits = self.compute_logits(hidden_states)
         logits_indices = query_start_loc[1:] - 1
         next_ids = self.global_sampler.sample(logits[logits_indices], removed_tokens=self.removed_tokens)
+        if os.environ.get("MIMO_PARITY_TRACE") == "1" and not is_capturing and next_ids is not None:
+            trace_steps: dict[str, int] = getattr(self, "_mimo_trace_steps", {})
+            top_scores, top_ids = logits[logits_indices].float().topk(2, dim=-1)
+            for index, request_id in enumerate(request_ids):
+                step = trace_steps.get(request_id, 0)
+                generated_len = (
+                    runtime_additional_information[index].get("generated_len")
+                    if index < len(runtime_additional_information)
+                    else None
+                )
+                logger.info(
+                    "MIMO_TOKEN_MARGIN request=%s step=%d generated_len=%s chosen=%d "
+                    "top1=%d top2=%d margin=%g empty_logit=%g eostm_logit=%g",
+                    request_id,
+                    step,
+                    generated_len,
+                    next_ids[index].item(),
+                    top_ids[index, 0].item(),
+                    top_ids[index, 1].item(),
+                    (top_scores[index, 0] - top_scores[index, 1]).item(),
+                    logits[logits_indices[index], self.empty_token_id].item(),
+                    logits[logits_indices[index], self.eostm_token_id].item(),
+                )
+                trace_steps[request_id] = step + 1
+            self._mimo_trace_steps = trace_steps
 
         new_audio_emb_by_req: dict[str, torch.Tensor] = {}
         batch_next_speech_tokens: torch.Tensor | None = None
