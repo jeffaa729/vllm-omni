@@ -1304,6 +1304,13 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
                 for req_idx, is_valid in enumerate(valid_mask):
                     if is_valid:
                         req_id = request_ids[req_idx] if request_ids is not None else str(req_idx)
+                        if os.environ.get("MIMO_PARITY_TRACE") == "1" and batch_next_speech_tokens is not None:
+                            logger.info(
+                                "MIMO_AUDIO_CODES request=%s step=%d ids=%s",
+                                req_id,
+                                getattr(self, "_mimo_trace_steps", {}).get(req_id, 1) - 1,
+                                ",".join(map(str, batch_next_speech_tokens[req_idx].flatten().tolist())),
+                            )
                         if batch_new_audio_emb is not None:
                             new_audio_emb_by_req[req_id] = batch_new_audio_emb[req_idx]
                     else:
