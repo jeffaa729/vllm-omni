@@ -8,6 +8,7 @@ with the correct prompt format on MiMo-Audio-Omni.
 import copy
 import json
 import os
+import random
 from typing import NamedTuple
 
 import soundfile as sf
@@ -299,7 +300,14 @@ def main(args):
             "The garden is quiet after rain.",
             "Thank you for your help today.",
         ]
-        prompts = [get_tts_sft(text=sample) for sample in texts]
+        # The TTS helper chooses a random wording for each prompt. Keep the
+        # graph-on and graph-off inputs identical without changing later RNG use.
+        rng_state = random.getstate()
+        try:
+            random.seed(SEED)
+            prompts = [get_tts_sft(text=sample) for sample in texts]
+        finally:
+            random.setstate(rng_state)
     else:
         prompts = [copy.deepcopy(query_result) for _ in range(args.num_prompts)]
 
