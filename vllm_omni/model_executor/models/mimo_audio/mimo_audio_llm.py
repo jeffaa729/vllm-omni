@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 # Copyright 2025 Xiaomi Corporation.
+import hashlib
 import logging
 import os
 import threading
@@ -1159,10 +1160,45 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
 
         # if id is empty_token_id, then will be use hs to do local forward
         hs_downsampled = self.hidden_states_downcast(hidden_states[:, -1:, :])
+        probe_indices: list[int] = []
+        input_hashes: dict[int, str] = {}
+        seen: set[str] = getattr(self, "_mimo_local_probe_seen", set())
+        if os.environ.get("MIMO_PARITY_TRACE") == "1":
+            probe_indices = [
+                index for index, request_id in enumerate(request_ids) if valid_mask[index] and request_id not in seen
+            ]
+            input_hashes = {
+                index: hashlib.sha256(
+                    hs_downsampled[index].detach().float().cpu().contiguous().numpy().tobytes()
+                ).hexdigest()
+                for index in probe_indices
+            }
         next_speech_tokens = self.local_forward(
             local_embeds=hs_downsampled,
             local_sampler=self.local_sampler,
         )
+        if probe_indices:
+            # The private CUDA graph may reuse its output buffer; preserve its
+            # actual tokens before executing the direct path on the same input.
+            next_speech_tokens = next_speech_tokens.clone()
+            direct_tokens = self.base_local_forward(
+                local_embeds=hs_downsampled.clone(),
+                tokens_dtype=next_speech_tokens.dtype,
+                tokens_device=next_speech_tokens.device,
+                local_sampler=self.local_sampler,
+            )
+            for index in probe_indices:
+                request_id = request_ids[index]
+                logger.info(
+                    "MIMO_LOCAL_PARITY request=%s step=%d input_sha256=%s private_vs_direct_diffs=%d direct_ids=%s",
+                    request_id,
+                    getattr(self, "_mimo_trace_steps", {}).get(request_id, 1) - 1,
+                    input_hashes[index],
+                    (next_speech_tokens[index] != direct_tokens[index]).sum().item(),
+                    ",".join(map(str, direct_tokens[index].flatten().tolist())),
+                )
+                seen.add(request_id)
+            self._mimo_local_probe_seen = seen
 
         # 4,8,4096 - Use pre-allocated buffer and zero it to avoid dynamic allocation
         new_audio_emb = self._new_audio_emb_buffer[:B].zero_()
