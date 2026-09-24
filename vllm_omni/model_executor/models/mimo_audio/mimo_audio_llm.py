@@ -1043,8 +1043,12 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
             local_sampler = MiMoSampler(do_sample=False, temperature=0.9, top_p=0.95)
 
         b = int(local_embeds.shape[0])
-        use_cg = (local_sampler.do_sample is None or local_sampler.do_sample is False) and bool(
-            self.local_forward_cg_by_bs
+        # Dev-only control: keep startup capture unchanged, but run this path
+        # directly to isolate interactions with the encoder graph manager.
+        use_cg = (
+            os.environ.get("MIMO_BYPASS_PRIVATE_LOCAL_CG") != "1"
+            and (local_sampler.do_sample is None or local_sampler.do_sample is False)
+            and bool(self.local_forward_cg_by_bs)
         )
         if use_cg:
             # Pick the smallest bucket >= b.
