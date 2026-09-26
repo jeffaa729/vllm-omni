@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
 from dataclasses import dataclass
 
@@ -54,6 +54,8 @@ _MODEL_COEFFICIENTS = {
         3.20000000e00,
         -2.00000000e-02,
     ],
+    # Start Ming calibration with the unscaled relative L1 distance.
+    "MingImageTransformer2DModel": [0.0, 0.0, 0.0, 1.0, 0.0],
     # Estimated TeaCache polynomial coefficients for StableAudioDiTModel.
     "StableAudioDiTModel": [
         121.77490545701518,
