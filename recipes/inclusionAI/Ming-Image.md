@@ -142,25 +142,41 @@ jq -r '.choices[0].message.content[].image_url.url | split(",")[1]' response.jso
 
 ## Step caching
 
-Step caching is disabled by default. To enable it for a serving run without editing the deploy YAML, pass the cache backend and its JSON configuration on the command line. These are global CLI flags; the step cache itself runs in the diffusion stage.
+Step caching is disabled by default. To enable it for serving, pass the cache backend and its JSON threshold configuration on the command line. The step cache runs in the diffusion stage.
 
 ```bash
-# Design: TeaCache
+# Design: TeaCache 0.30
 vllm serve inclusionAI/Ming-Image-0.1-Design --omni \
   --deploy-config vllm_omni/deploy/ming_image.yaml \
   --cache-backend tea_cache \
   --cache-config '{"rel_l1_thresh":0.3}' \
   --port 8091
 
-# Design-Layer: Cache-DiT
+# Design: Cache-DiT 0.16
+vllm serve inclusionAI/Ming-Image-0.1-Design --omni \
+  --deploy-config vllm_omni/deploy/ming_image.yaml \
+  --cache-backend cache_dit \
+  --cache-config '{"residual_diff_threshold":0.16}' \
+  --port 8091
+
+# Design-Layer: TeaCache 0.13
+vllm serve inclusionAI/Ming-Image-0.1-Design-Layer --omni \
+  --deploy-config vllm_omni/deploy/ming_image.yaml \
+  --cache-backend tea_cache \
+  --cache-config '{"rel_l1_thresh":0.13}' \
+  --port 8091
+
+# Design-Layer: Cache-DiT 0.16
 vllm serve inclusionAI/Ming-Image-0.1-Design-Layer --omni \
   --deploy-config vllm_omni/deploy/ming_image.yaml \
   --cache-backend cache_dit \
-  --cache-config '{"residual_diff_threshold":0.24}' \
+  --cache-config '{"residual_diff_threshold":0.16}' \
   --port 8091
 ```
 
-Representative matched dense/cache online runs on 2×H100 80 GB (vLLM 0.30.0, 1024×1024, 12 steps, concurrency 1):
+In these measured runs, Design TeaCache 0.30 reduced E2E latency by 6.8%, Design Cache-DiT 0.16 by 23.5%, Design-Layer TeaCache 0.13 by 18.7%, and Design-Layer Cache-DiT 0.16 by 23.3% versus no cache.
+
+Representative online runs on 2×H100 80 GB (vLLM 0.30.0, 1024×1024, 12 steps, concurrency 1):
 
 For Design, all profiles use one shared no-cache control: the same 1024×1024 botanical-poster prompt, CFG 1.0, 12 steps, and seed 42.
 
@@ -174,6 +190,7 @@ For Design, all profiles use one shared no-cache control: the same 1024×1024 bo
 | Cache-DiT 0.10 | 2.206 | 1,591 | 0.453 | 0.953 / 24.70 / 0.018 |
 | Cache-DiT 0.16 | 1.698 | 1,289 | 0.589 | 0.853 / 19.11 / 0.095 |
 | Cache-DiT 0.20 | 1.783 | 1,291 | 0.561 | 0.840 / 18.73 / 0.114 |
+| Cache-DiT 0.24 | 1.988 | 1,238 | 0.503 | 0.787 / 17.20 / 0.146 |
 
 ### Design-Layer
 

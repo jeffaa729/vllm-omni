@@ -111,6 +111,7 @@ _MODEL_COEFFICIENTS = {
 
 _DEFAULT_REL_L1_THRESH = 0.2
 _MODEL_DEFAULT_REL_L1_THRESH = {
+    "MingImageTransformer2DModel": 0.3,
     "MiniMaxH3DiTModel": 0.17,
 }
 
