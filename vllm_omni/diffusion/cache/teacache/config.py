@@ -54,8 +54,22 @@ _MODEL_COEFFICIENTS = {
         3.20000000e00,
         -2.00000000e-02,
     ],
-    # Start Ming calibration with the unscaled relative L1 distance.
-    "MingImageTransformer2DModel": [0.0, 0.0, 0.0, 1.0, 0.0],
+    # Ming-Image Design: fitted from six 12-step dense trajectories (seed 44 held out).
+    "MingImageTransformer2DModel": [
+        -57.055401718775904,
+        72.6536100150667,
+        -25.631792683751826,
+        2.1642316704465916,
+        0.4122647576139916,
+    ],
+    # Design-Layer uses batch-doubled CFG; its fit differs from Design's.
+    "MingImageTransformer2DModel:Design-Layer": [
+        -16.335467031829666,
+        24.355287890561343,
+        -8.367639635462886,
+        1.2292432435007727,
+        0.06797515812332866,
+    ],
     # Estimated TeaCache polynomial coefficients for StableAudioDiTModel.
     "StableAudioDiTModel": [
         121.77490545701518,
