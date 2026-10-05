@@ -85,8 +85,6 @@ logger = logging.getLogger(__name__)
 # CUDA Graph buckets for MiMo local decoding.
 # We keep the list small to balance warmup time and runtime coverage.
 MIMO_CUDAGRAPH_BATCH_SIZES: tuple[int, ...] = (1, 2, 4, 6, 8, 16, 32, 64, 128)
-MIMO_INPUT_LOCAL_MODALITY = "mimo_input_local"
-MIMO_INPUT_LOCAL_BUFFER_KEY = "input_local_embeds"
 
 
 @dataclass
@@ -643,13 +641,13 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
 
     def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
         return EncoderCudaGraphConfig(
-            modalities=[MIMO_INPUT_LOCAL_MODALITY],
-            buffer_keys=[MIMO_INPUT_LOCAL_BUFFER_KEY],
+            modalities=["audio"],
+            buffer_keys=["inputs_embeds"],
             out_hidden_size=self.input_local_config.hidden_size,
         )
 
     def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
-        return MIMO_INPUT_LOCAL_MODALITY if MIMO_INPUT_LOCAL_BUFFER_KEY in mm_kwargs else "audio"
+        return "audio"
 
     def get_max_frames_per_video(self) -> int:
         return 1
@@ -658,13 +656,13 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         return self.group_size, self.group_size * max(MIMO_CUDAGRAPH_BATCH_SIZES)
 
     def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]) -> list[EncoderItemSpec]:
-        input_embeds = mm_kwargs[MIMO_INPUT_LOCAL_BUFFER_KEY]
+        input_embeds = mm_kwargs["inputs_embeds"]
         tokens = input_embeds.shape[0] * self.group_size
         return [EncoderItemSpec(input_size=tokens, output_tokens=tokens)]
 
     def select_encoder_cudagraph_items(self, mm_kwargs: dict[str, Any], indices: list[int]) -> dict[str, Any]:
         assert indices == [0]
-        return {MIMO_INPUT_LOCAL_BUFFER_KEY: mm_kwargs[MIMO_INPUT_LOCAL_BUFFER_KEY]}
+        return {"inputs_embeds": mm_kwargs["inputs_embeds"]}
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -682,7 +680,7 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
             device=device,
             dtype=dtype,
         )
-        return EncoderCudaGraphCaptureInputs(values={MIMO_INPUT_LOCAL_BUFFER_KEY: input_embeds})
+        return EncoderCudaGraphCaptureInputs(values={"inputs_embeds": input_embeds})
 
     def prepare_encoder_cudagraph_replay_buffers(
         self,
@@ -691,13 +689,11 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         max_frames_per_batch: int,
         path: str = "default",
     ) -> EncoderCudaGraphReplayBuffers:
-        return EncoderCudaGraphReplayBuffers(
-            values={MIMO_INPUT_LOCAL_BUFFER_KEY: mm_kwargs[MIMO_INPUT_LOCAL_BUFFER_KEY]}
-        )
+        return EncoderCudaGraphReplayBuffers(values={"inputs_embeds": mm_kwargs["inputs_embeds"]})
 
     def encoder_cudagraph_forward(self, inputs: dict[str, torch.Tensor], path: str = "default") -> torch.Tensor:
         output = self.input_local_transformer(
-            inputs_embeds=inputs[MIMO_INPUT_LOCAL_BUFFER_KEY],
+            inputs_embeds=inputs["inputs_embeds"],
             return_dict=True,
             is_causal=False,
         ).last_hidden_state
@@ -1062,7 +1058,7 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
             new_audio_emb += cur_speech_embeds
 
         input_local_in = new_audio_emb.reshape(B * T_groups, group_size, hidden_size)
-        mm_kwargs = {MIMO_INPUT_LOCAL_BUFFER_KEY: input_local_in}
+        mm_kwargs = {"inputs_embeds": input_local_in}
         manager = self._input_local_encoder_cudagraph_manager
         if manager is not None and manager.is_captured():
             new_audio_emb_last_hidden = manager.execute(mm_kwargs)[0]

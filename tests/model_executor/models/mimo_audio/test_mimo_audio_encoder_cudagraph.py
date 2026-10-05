@@ -14,11 +14,7 @@ from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm_omni.model_executor.models.mimo_audio.mimo_audio import (
     MiMoAudioForConditionalGeneration,
 )
-from vllm_omni.model_executor.models.mimo_audio.mimo_audio_llm import (
-    MIMO_INPUT_LOCAL_BUFFER_KEY,
-    MIMO_INPUT_LOCAL_MODALITY,
-    MiMoAudioLLMForConditionalGeneration,
-)
+from vllm_omni.model_executor.models.mimo_audio.mimo_audio_llm import MiMoAudioLLMForConditionalGeneration
 from vllm_omni.worker.gpu_model_runner import OmniGPUModelRunner
 
 
@@ -85,7 +81,7 @@ def test_stage_wrapper_exposes_protocol_and_runner_attaches_manager(monkeypatch:
     wrapper = _stage_wrapper(child)
 
     assert supports_encoder_cudagraph(wrapper)
-    assert wrapper.get_encoder_cudagraph_config().modalities == [MIMO_INPUT_LOCAL_MODALITY]
+    assert wrapper.get_encoder_cudagraph_config().modalities == ["audio"]
 
     runner = object.__new__(OmniGPUModelRunner)
     runner.encoder_cudagraph_manager = manager
@@ -106,7 +102,7 @@ def test_input_local_transformer_uses_attached_manager() -> None:
         execute=Mock(
             side_effect=lambda kwargs: [
                 torch.full(
-                    (kwargs[MIMO_INPUT_LOCAL_BUFFER_KEY].shape[0] * model.group_size, 8),
+                    (kwargs["inputs_embeds"].shape[0] * model.group_size, 8),
                     7.0,
                 )
             ]
@@ -127,7 +123,7 @@ def test_input_local_transformer_stays_eager_without_manager() -> None:
     model = _generation_model()
     eager = Mock(
         side_effect=lambda kwargs, path="default": torch.full(
-            (kwargs[MIMO_INPUT_LOCAL_BUFFER_KEY].shape[0] * model.group_size, 8),
+            (kwargs["inputs_embeds"].shape[0] * model.group_size, 8),
             3.0,
         )
     )
@@ -181,7 +177,7 @@ def test_manager_matches_eager_across_tiers_and_falls_back_out_of_range() -> Non
             device=device,
             dtype=torch.bfloat16,
         ).reshape(rows, child.group_size, child.input_local_config.hidden_size)
-        mm_kwargs = {MIMO_INPUT_LOCAL_BUFFER_KEY: inputs}
+        mm_kwargs = {"inputs_embeds": inputs}
         eager = model.encoder_eager_forward(mm_kwargs)
         actual = manager.execute(mm_kwargs)[0]
 
