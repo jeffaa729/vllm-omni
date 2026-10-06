@@ -576,6 +576,7 @@ class MiMoAudioForConditionalGeneration(
             )
             self.token2wav = None
             self.model = self.fused_thinker_talker
+            self.supports_cudagraph_full = False
 
         elif self.model_stage == "code2wav":
             self.fused_thinker_talker = None
