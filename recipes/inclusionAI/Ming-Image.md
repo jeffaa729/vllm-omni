@@ -185,12 +185,8 @@ For Design, all profiles use one shared no-cache control: the same 1024×1024 bo
 | Profile | E2E s | Stage 1 ms | req/s | SSIM / PSNR dB / LPIPS |
 | --- | ---: | ---: | ---: | ---: |
 | No cache | 2.219 | 1,596 | 0.451 | — |
-| TeaCache 0.20 | 2.202 | 1,589 | 0.454 | 0.953 / 24.70 / 0.018 |
 | TeaCache 0.30 | 2.068 | 1,465 | 0.484 | 0.948 / 24.51 / 0.021 |
-| Cache-DiT 0.10 | 2.206 | 1,591 | 0.453 | 0.953 / 24.70 / 0.018 |
 | Cache-DiT 0.16 | 1.698 | 1,289 | 0.589 | 0.853 / 19.11 / 0.095 |
-| Cache-DiT 0.20 | 1.783 | 1,291 | 0.561 | 0.840 / 18.73 / 0.114 |
-| Cache-DiT 0.24 | 1.988 | 1,238 | 0.503 | 0.787 / 17.20 / 0.146 |
 
 ### Design-Layer
 
@@ -199,9 +195,5 @@ One fixed reference image and prompt, CFG 2.0, one warmup and three measured run
 | Profile | E2E s | Stage 1 ms | req/s | SSIM / PSNR dB / LPIPS |
 | --- | ---: | ---: | ---: | ---: |
 | No cache | 12.723 | 10,813 | 0.079 | — |
-| TeaCache 0.10 | 12.524 | 10,754 | 0.080 | 1.000 / ∞ / 0.000 |
 | TeaCache 0.13 | 10.343 | 8,547 | 0.097 | 0.988 / 22.06 / 0.011 |
-| TeaCache 0.15 | 8.869 | 6,959 | 0.113 | 0.812 / 12.18 / 0.303 |
 | Cache-DiT 0.16 | 9.764 | 7,986 | 0.102 | 0.991 / 28.06 / 0.007 |
-| Cache-DiT 0.20 | 8.770 | 7,503 | 0.114 | 0.986 / 25.94 / 0.009 |
-| Cache-DiT 0.24 | 8.772 | 7,160 | 0.114 | 0.990 / 26.01 / 0.008 |
