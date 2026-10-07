@@ -3,6 +3,7 @@
 
 # Copyright 2026 Tencent.
 from collections.abc import Hashable, Iterable
+from typing import Any
 
 import torch
 from torch import nn
@@ -148,16 +149,15 @@ class CovoAudioLLMForConditionalGeneration(nn.Module, SupportsPP, SupportsMultiM
     def get_encoder_cudagraph_budget_range(self, vllm_config: VllmConfig) -> tuple[int, int]:
         return _MAX_AUDIO_TOKENS, 2 * _MAX_AUDIO_TOKENS
 
-    def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, object]) -> list[EncoderItemSpec]:
+    def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]) -> list[EncoderItemSpec]:
         audio_features = mm_kwargs["audio_features"]
-        assert isinstance(audio_features, torch.Tensor)
         return [
             EncoderItemSpec(input_size=audio_features.shape[-1], output_tokens=_MAX_AUDIO_TOKENS)
             for _ in range(audio_features.shape[0])
         ]
 
-    def select_encoder_cudagraph_items(self, mm_kwargs: dict[str, object], indices: list[int]) -> dict[str, object]:
-        return {key: value[indices] if isinstance(value, torch.Tensor) else value for key, value in mm_kwargs.items()}
+    def select_encoder_cudagraph_items(self, mm_kwargs: dict[str, Any], indices: list[int]) -> dict[str, Any]:
+        return {key: value[indices] for key, value in mm_kwargs.items()}
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -179,22 +179,20 @@ class CovoAudioLLMForConditionalGeneration(nn.Module, SupportsPP, SupportsMultiM
 
     def prepare_encoder_cudagraph_replay_buffers(
         self,
-        mm_kwargs: dict[str, object],
+        mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
         path: str = "default",
     ) -> EncoderCudaGraphReplayBuffers:
         audio_features = mm_kwargs["audio_features"]
-        assert isinstance(audio_features, torch.Tensor)
         return EncoderCudaGraphReplayBuffers({"audio_features": audio_features})
 
     def encoder_cudagraph_forward(self, inputs: dict[str, torch.Tensor], path: str = "default") -> torch.Tensor:
         feats = self.encoder(inputs["audio_features"]).last_hidden_state
         return self.audio_adapter(feats)
 
-    def encoder_eager_forward(self, mm_kwargs: dict[str, object], path: str = "default") -> torch.Tensor:
+    def encoder_eager_forward(self, mm_kwargs: dict[str, Any], path: str = "default") -> torch.Tensor:
         audio_features = mm_kwargs["audio_features"]
-        assert isinstance(audio_features, torch.Tensor)
         encoder_dtype = next(self.encoder.parameters()).dtype
         return self.encoder_cudagraph_forward({"audio_features": audio_features.to(dtype=encoder_dtype)}, path)
 
@@ -205,13 +203,13 @@ class CovoAudioLLMForConditionalGeneration(nn.Module, SupportsPP, SupportsMultiM
         per_item_out_tokens: list[int],
         dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
         clone: bool = False,
-        batch_mm_kwargs: dict[str, object] | None = None,
+        batch_mm_kwargs: dict[str, Any] | None = None,
     ) -> None:
         assert batch_mm_kwargs is not None
         audio_num_tokens = batch_mm_kwargs.get("audio_num_tokens")
         features = outputs["default"]
         for batch_idx, original_idx in enumerate(indices):
-            n = int(audio_num_tokens[batch_idx]) if isinstance(audio_num_tokens, torch.Tensor) else _MAX_AUDIO_TOKENS
+            n = int(audio_num_tokens[batch_idx]) if audio_num_tokens is not None else _MAX_AUDIO_TOKENS
             item = features[batch_idx, :n, :]
             dest[original_idx] = item.clone() if clone else item
 
