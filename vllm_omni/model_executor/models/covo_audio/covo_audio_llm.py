@@ -19,7 +19,7 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderItemSpec,
 )
 
-_MAX_AUDIO_TOKENS = 188
+from vllm_omni.model_executor.models.covo_audio.covo_audio import MAX_AUDIO_TOKENS
 
 
 class DownsampleLayer(nn.Module):
@@ -120,13 +120,8 @@ class CovoAudioLLMForConditionalGeneration(nn.Module, SupportsPP, SupportsMultiM
         )
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        audio_features = kwargs["audio_features"]
         audio_num_tokens = kwargs.get("audio_num_tokens")
-        # Match encoder dtype (bfloat16) since audio_features from WhisperFeatureExtractor are float32
-        encoder_dtype = next(self.encoder.parameters()).dtype
-        audio_features = audio_features.to(dtype=encoder_dtype)
-        feats = self.encoder(audio_features).last_hidden_state
-        features = self.audio_adapter(feats)
+        features = self.encoder_eager_forward(kwargs)
         # Truncate each audio to its actual length (Whisper pads all to 30s)
         # Return a list of per-item tensors since lengths may differ.
         batch_size = features.shape[0]
@@ -147,12 +142,12 @@ class CovoAudioLLMForConditionalGeneration(nn.Module, SupportsPP, SupportsMultiM
         )
 
     def get_encoder_cudagraph_budget_range(self, vllm_config: VllmConfig) -> tuple[int, int]:
-        return _MAX_AUDIO_TOKENS, 2 * _MAX_AUDIO_TOKENS
+        return MAX_AUDIO_TOKENS, 2 * MAX_AUDIO_TOKENS
 
     def get_encoder_cudagraph_item_specs(self, mm_kwargs: dict[str, Any]) -> list[EncoderItemSpec]:
         audio_features = mm_kwargs["audio_features"]
         return [
-            EncoderItemSpec(input_size=audio_features.shape[-1], output_tokens=_MAX_AUDIO_TOKENS)
+            EncoderItemSpec(input_size=audio_features.shape[-1], output_tokens=MAX_AUDIO_TOKENS)
             for _ in range(audio_features.shape[0])
         ]
 
@@ -169,7 +164,7 @@ class CovoAudioLLMForConditionalGeneration(nn.Module, SupportsPP, SupportsMultiM
         path: str = "default",
         axis_keys: tuple[Hashable, ...] | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
-        batch_size = min(token_budget // _MAX_AUDIO_TOKENS, max_batch_size)
+        batch_size = min(token_budget // MAX_AUDIO_TOKENS, max_batch_size)
         if batch_size < 1:
             raise ValueError("CoVo encoder CUDA graph budget must fit at least one audio item")
         encoder_dtype = next(self.encoder.parameters()).dtype
@@ -209,7 +204,7 @@ class CovoAudioLLMForConditionalGeneration(nn.Module, SupportsPP, SupportsMultiM
         audio_num_tokens = batch_mm_kwargs.get("audio_num_tokens")
         features = outputs["default"]
         for batch_idx, original_idx in enumerate(indices):
-            n = int(audio_num_tokens[batch_idx]) if audio_num_tokens is not None else _MAX_AUDIO_TOKENS
+            n = int(audio_num_tokens[batch_idx]) if audio_num_tokens is not None else MAX_AUDIO_TOKENS
             item = features[batch_idx, :n, :]
             dest[original_idx] = item.clone() if clone else item
 
