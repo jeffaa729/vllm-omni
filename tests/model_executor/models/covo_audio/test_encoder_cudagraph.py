@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -8,10 +9,13 @@ import torch
 from torch import nn
 from vllm.config import CUDAGraphMode, ModelConfig, VllmConfig
 from vllm.config.multimodal import MultiModalConfig
-from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
+from tests.helpers.mark import hardware_test
 from vllm_omni.model_executor.models.covo_audio.covo_audio import CovoAudioForConditionalGeneration
 from vllm_omni.model_executor.models.covo_audio.covo_audio_llm import CovoAudioLLMForConditionalGeneration
+from vllm_omni.worker.encoder_cudagraph import SingleReplayEncoderCudaGraphManager
+from vllm_omni.worker.gpu_model_runner import OmniGPUModelRunner
 
 pytestmark = [pytest.mark.core_model]
 
@@ -61,9 +65,7 @@ def _inputs(lengths: list[int], device: str, seed: int) -> dict[str, torch.Tenso
 
 
 def _runner(model: CovoAudioForConditionalGeneration, config: VllmConfig, device: str):
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
-
-    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner = OmniGPUModelRunner.__new__(OmniGPUModelRunner)
     runner.compilation_config = config.compilation_config
     runner.supports_mm_inputs = True
     runner.get_model = lambda: model
@@ -71,6 +73,32 @@ def _runner(model: CovoAudioForConditionalGeneration, config: VllmConfig, device
     runner.device = torch.device(device)
     runner.dtype = torch.float32
     return runner
+
+
+def _run_encoder_step(monkeypatch, model, manager, inputs):
+    import vllm.v1.worker.gpu_model_runner as runner_module
+
+    num_items = inputs["audio_features"].shape[0]
+    monkeypatch.setattr(
+        runner_module, "group_and_batch_mm_kwargs", lambda *args, **kwargs: iter([("audio", num_items, inputs)])
+    )
+    keys = [f"audio{index}" for index in range(num_items)]
+    cached: dict[str, torch.Tensor] = {}
+    runner = SimpleNamespace(
+        _batch_mm_inputs_from_scheduler=lambda _: (keys, [("audio", {}) for _ in keys], []),
+        observability_config=None,
+        model=model,
+        lora_config=None,
+        device=inputs["audio_features"].device,
+        is_multimodal_pruning_enabled=False,
+        requires_sequential_video_encoding=False,
+        timed_encoder_operation=lambda *args: nullcontext(),
+        encoder_cudagraph_manager=manager,
+        _cache_encoder_output=lambda key, value, *args: cached.__setitem__(key, value),
+    )
+    scheduler = SimpleNamespace(ec_manager_metadata=None, free_encoder_mm_hashes=[])
+    GPUModelRunner._execute_mm_encoder(runner, scheduler)
+    return [cached[key] for key in keys]
 
 
 @pytest.mark.cpu
@@ -108,10 +136,10 @@ def test_stage0_stays_eager_without_cuda_or_opt_in(enabled: bool) -> None:
     assert model.embed_multimodal(**_inputs([35], "cpu", seed=0))[0].shape == (35, 6)
 
 
-@pytest.mark.cuda
+@hardware_test(res={"cuda": "L4"})
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @torch.inference_mode()
-def test_stage0_encoder_graph_matches_eager_and_splits_large_batches() -> None:
+def test_stage0_encoder_graph_matches_eager_and_preserves_large_batches(monkeypatch) -> None:
     model = _stage0_model("cuda")
     config = VllmConfig()
     config.model_config = ModelConfig.__new__(ModelConfig)
@@ -120,15 +148,23 @@ def test_stage0_encoder_graph_matches_eager_and_splits_large_batches() -> None:
     config.compilation_config.encoder_cudagraph_token_budgets = [188, 376]
     config.compilation_config.encoder_cudagraph_max_vision_items_per_batch = 2
     manager = _runner(model, config, "cuda")._create_encoder_cudagraph_manager()
-    assert isinstance(manager, EncoderCudaGraphManager)
+    assert isinstance(manager, SingleReplayEncoderCudaGraphManager)
     manager.capture(None)
 
     assert manager.get_cumulative_stats()["num_budgets"] == 2
+    embed_multimodal = model.embed_multimodal
+    eager_batch_sizes: list[int] = []
+
+    def record_eager_batch(**kwargs):
+        eager_batch_sizes.append(kwargs["audio_features"].shape[0])
+        return embed_multimodal(**kwargs)
+
+    monkeypatch.setattr(model, "embed_multimodal", record_eager_batch)
     retained_output = None
     for lengths, seed in [([35], 0), ([35, 161], 1), ([35, 161, 50], 2)]:
         inputs = _inputs(lengths, "cuda", seed)
-        expected = model.embed_multimodal(**inputs)
-        actual = manager.execute(inputs)
+        expected = embed_multimodal(**inputs)
+        actual = _run_encoder_step(monkeypatch, model, manager, inputs)
         assert len(actual) == len(expected)
         for graph_output, eager_output in zip(actual, expected, strict=True):
             torch.testing.assert_close(graph_output, eager_output)
@@ -139,8 +175,9 @@ def test_stage0_encoder_graph_matches_eager_and_splits_large_batches() -> None:
     torch.testing.assert_close(retained_output, retained_expected)
     assert set(manager.budget_graphs["default"]) == {188, 376}
 
-    # The three-item input exceeds the graph's two-item limit and is split.
+    # The oversized group reaches the encoder in one eager call, without splitting.
+    assert eager_batch_sizes == [3]
     stats = manager.get_cumulative_stats()
-    assert stats["graph_hits"] == 6
-    assert stats["graph_misses"] == 0
+    assert stats["graph_hits"] == 3
+    assert stats["graph_misses"] == 3
     manager.clear()

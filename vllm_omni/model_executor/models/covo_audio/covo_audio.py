@@ -192,6 +192,7 @@ class CovoAudioForConditionalGeneration(
     CustomProcessMixin,
 ):
     requires_raw_input_tokens: bool = True
+    encoder_cudagraph_single_replay = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
