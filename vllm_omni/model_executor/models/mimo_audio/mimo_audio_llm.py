@@ -637,13 +637,13 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
 
     def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
         return EncoderCudaGraphConfig(
-            modalities=["audio"],
+            modalities=["mimo_input_local"],
             buffer_keys=["inputs_embeds"],
             out_hidden_size=self.input_local_config.hidden_size,
         )
 
     def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
-        return "audio"
+        return "mimo_input_local"
 
     def get_max_frames_per_video(self) -> int:
         return 1

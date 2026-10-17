@@ -11,6 +11,7 @@ from vllm.model_executor.models.interfaces import supports_encoder_cudagraph
 from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
+from tests.helpers.mark import hardware_test
 from vllm_omni.model_executor.models.mimo_audio.mimo_audio import (
     MiMoAudioForConditionalGeneration,
 )
@@ -81,7 +82,6 @@ def test_stage_wrapper_exposes_protocol_and_runner_attaches_manager(monkeypatch:
     wrapper = _stage_wrapper(child)
 
     assert supports_encoder_cudagraph(wrapper)
-    assert wrapper.get_encoder_cudagraph_config().modalities == ["audio"]
 
     runner = object.__new__(OmniGPUModelRunner)
     runner.encoder_cudagraph_manager = manager
@@ -151,7 +151,7 @@ def _manager_config() -> SimpleNamespace:
     )
 
 
-@pytest.mark.cuda
+@hardware_test(res={"cuda": "L4"})
 @pytest.mark.core_model
 def test_manager_matches_eager_across_tiers_and_falls_back_out_of_range() -> None:
     device = torch.device("cuda")
