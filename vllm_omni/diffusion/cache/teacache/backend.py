@@ -126,12 +126,13 @@ def enable_minimax_h3_teacache(pipeline: Any, config: DiffusionCacheConfig) -> N
 
 def enable_ming_image_teacache(pipeline: Any, config: DiffusionCacheConfig) -> None:
     """Use the Design or Design-Layer calibration for the shared Ming transformer."""
+    threshold = 0.13 if config.rel_l1_thresh is None and pipeline.is_layer_decomposition else config.rel_l1_thresh
     coefficients = config.coefficients
     if coefficients is None and pipeline.is_layer_decomposition:
         coefficients = _MODEL_COEFFICIENTS["MingImageTransformer2DModel:Design-Layer"]
     teacache_config = TeaCacheConfig(
         transformer_type="MingImageTransformer2DModel",
-        rel_l1_thresh=config.rel_l1_thresh,
+        rel_l1_thresh=threshold,
         coefficients=coefficients,
     )
     apply_teacache_hook(pipeline.transformer, teacache_config)
