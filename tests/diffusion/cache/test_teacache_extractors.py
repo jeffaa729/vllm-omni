@@ -35,8 +35,8 @@ from vllm_omni.diffusion.cache.teacache.extractors import (
     extract_flux2_context,
     extract_flux2_klein_context,
     extract_flux_context,
-    extract_ming_image_context,
     extract_mammoth_moda2_context,
+    extract_ming_image_context,
     extract_minimax_h3_context,
     extract_zimage_context,
 )
