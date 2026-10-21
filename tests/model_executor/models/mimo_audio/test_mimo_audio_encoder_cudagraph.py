@@ -77,11 +77,18 @@ def _stage_wrapper(
 @pytest.mark.cpu
 @pytest.mark.core_model
 def test_stage_wrapper_exposes_protocol_and_runner_attaches_manager(monkeypatch: pytest.MonkeyPatch) -> None:
-    manager = object()
     child = _protocol_model()
     wrapper = _stage_wrapper(child)
 
     assert supports_encoder_cudagraph(wrapper)
+    manager = EncoderCudaGraphManager(
+        _manager_config(),
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
+        model=wrapper,
+    )
+    assert manager.supports_modality("mimo_input_local")
+    assert not manager.supports_modality("audio")
 
     runner = object.__new__(OmniGPUModelRunner)
     runner.encoder_cudagraph_manager = manager
