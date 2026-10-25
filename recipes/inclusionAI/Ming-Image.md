@@ -39,26 +39,6 @@ vllm serve "$MODEL" --omni --deploy-config vllm_omni/deploy/ming_image.yaml --po
 
 For layer decomposition, set `MODEL` to `inclusionAI/Ming-Image-0.1-Design-Layer`.
 
-### Compile profile
-
-Stage 1 can warm a selected set of exact resolution/layer-count buckets at startup.
-For example, to serve Design at 1024×1024:
-
-```bash
-vllm serve inclusionAI/Ming-Image-0.1-Design --omni \
-  --deploy-config vllm_omni/deploy/ming_image.yaml --port 8091 \
-  --stage-overrides '{"1":{"additional_config":{"ming_image_compile_buckets":[{"height":1024,"width":1024,"num_layers":1}]}}}'
-```
-
-For Design-Layer with six output layers, use the same command with the
-Design-Layer model and `"num_layers":6`. List each production resolution and
-layer count in `ming_image_compile_buckets`; the profile accepts those exact
-combinations. Height and width must be divisible by 16. Omit the profile to
-serve unrestricted shapes.
-
-To compare bucketed static compilation with the default dynamic compilation,
-add `"diffusion_compile_dynamic":false` inside the Stage 1 override.
-
 ## Text-to-image
 
 Note that a prompt refiner is expected to describe the prompts with details; we will refine with more example inputs soon.
@@ -157,6 +137,33 @@ jq -r '.choices[0].message.content[].image_url.url | split(",")[1]' response.jso
 - A non-empty `negative_prompt` is rejected; Ming-Image uses zero negative conditioning.
 - Height and width must be divisible by 16.
 - Returned images retain the checkpoint's four RGBA channels.
+
+## Compile profile
+
+Stage 1 prewarms the transformer for configured production shapes at startup.
+Run a representative request with `VLLM_LOGGING_LEVEL=DEBUG` and read
+`num_condition_tokens` from the `Ming-Image transformer input` log. Set
+`MING_CONDITION_TOKENS` to that observed value. For example, to serve Design at 1024×1024:
+
+```bash
+vllm serve inclusionAI/Ming-Image-0.1-Design --omni \
+  --deploy-config vllm_omni/deploy/ming_image.yaml --port 8091 \
+  --stage-overrides '{"1":{"additional_config":{"compile_buckets":[
+    {"height":1024,"width":1024,"num_layers":1,"num_condition_tokens":'"$MING_CONDITION_TOKENS"'}
+  ]}}}'
+```
+
+For Design-Layer, use its model name, requested `num_layers`, and observed
+conditioning length. Add an entry for each production shape; height and width
+must be divisible by 16. Serving accepts the listed resolution/layer combinations.
+New conditioning lengths compile on demand.
+
+Warmup defaults to CFG 1 for Design and CFG 2 for Design-Layer. Set the bucket's
+`guidance_scale` when using another value. Design image editing also needs
+`"has_reference":true`. Startup logs show the warmed shapes and elapsed time.
+
+To compare bucketed static compilation with the default dynamic compilation,
+add `"diffusion_compile_dynamic":false` inside the Stage 1 override.
 
 ## Step caching
 

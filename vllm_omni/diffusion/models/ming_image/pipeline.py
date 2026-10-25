@@ -28,7 +28,7 @@ from vllm_omni.diffusion.forward_context import (
 )
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.model_loader.hub_prefetch import from_pretrained_with_prefetch
-from vllm_omni.diffusion.models.ming_image.compile_profile import warmup_compile_buckets
+from vllm_omni.diffusion.models.ming_image.compile_profile import MingImageCompileBucket, warmup_compile_buckets
 from vllm_omni.diffusion.models.ming_image.condition import MingImageConditioning
 from vllm_omni.diffusion.models.ming_image.transformer import MingImageTransformer2DModel
 from vllm_omni.diffusion.models.z_image.pipeline_z_image import ZImagePipeline
@@ -131,8 +131,7 @@ class MingImageDiffusionPipeline(ZImagePipeline):
 
         self.od_config = od_config
         self.compile_buckets = tuple(
-            (bucket["height"], bucket["width"], bucket["num_layers"])
-            for bucket in od_config.additional_config.get("ming_image_compile_buckets", ())
+            MingImageCompileBucket(**bucket) for bucket in od_config.additional_config.get("compile_buckets", ())
         )
         self._execution_device = get_local_device()
         self.device = self._execution_device
@@ -328,10 +327,23 @@ class MingImageDiffusionPipeline(ZImagePipeline):
 
         height = int(extra_args.get("height") or sampling.height or 1024)
         width = int(extra_args.get("width") or sampling.width or 1024)
-        if self.compile_buckets and not is_dummy_run and (height, width, num_layers) not in self.compile_buckets:
-            raise ValueError(f"Ming-Image shape {(height, width, num_layers)} is outside ming_image_compile_buckets")
+        if (
+            self.compile_buckets
+            and not is_dummy_run
+            and not any(bucket.shape == (height, width, num_layers) for bucket in self.compile_buckets)
+        ):
+            raise ValueError(f"Ming-Image shape {(height, width, num_layers)} is outside compile_buckets")
         steps = int(sampling.num_inference_steps or self.default_num_inference_steps)
         cfg = float(sampling.guidance_scale) if sampling.guidance_scale_provided else self.default_guidance_scale
+        logger.debug(
+            "Ming-Image transformer input: %dx%d, layers=%d, num_condition_tokens=%d, cfg=%g, reference=%s",
+            height,
+            width,
+            num_layers,
+            direct_hidden.shape[1],
+            cfg,
+            reference is not None,
+        )
         seed = extra_args.get("seed", sampling.seed)
         generator = torch.Generator(device="cpu").manual_seed(int(seed)) if seed is not None else sampling.generator
 
