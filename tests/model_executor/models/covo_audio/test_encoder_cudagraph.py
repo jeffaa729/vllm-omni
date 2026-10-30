@@ -3,7 +3,9 @@
 
 from contextlib import nullcontext
 from types import SimpleNamespace
+from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 from torch import nn
@@ -12,7 +14,13 @@ from vllm.config.multimodal import MultiModalConfig
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 from tests.helpers.mark import hardware_test
-from vllm_omni.model_executor.models.covo_audio.covo_audio import MAX_AUDIO_TOKENS, CovoAudioForConditionalGeneration
+from vllm_omni.model_executor.models.covo_audio.covo_audio import (
+    AUDIO_CHUNK_LENGTH,
+    AUDIO_SAMPLE_RATE,
+    MAX_AUDIO_TOKENS,
+    CovoAudioForConditionalGeneration,
+    CovoAudioMultiModalProcessor,
+)
 from vllm_omni.model_executor.models.covo_audio.covo_audio_llm import CovoAudioLLMForConditionalGeneration
 from vllm_omni.worker.encoder_cudagraph import SingleReplayEncoderCudaGraphManager
 from vllm_omni.worker.gpu_model_runner import OmniGPUModelRunner
@@ -136,6 +144,26 @@ def test_stage0_rejects_invalid_audio_lengths(num_tokens: int) -> None:
             dest={},
             batch_mm_kwargs=inputs,
         )
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("extra_samples", [0, AUDIO_SAMPLE_RATE // 10])
+def test_processor_audio_duration_boundary(extra_samples: int) -> None:
+    processor = CovoAudioMultiModalProcessor.__new__(CovoAudioMultiModalProcessor)
+    processor.info = Mock()
+    processor.info.get_tokenizer.return_value.encode.return_value = [1]
+    extractor = processor.info.get_feature_extractor.return_value
+    extractor.return_value = {"input_features": torch.zeros(1, 128, 3000)}
+    audio = np.zeros(AUDIO_CHUNK_LENGTH * AUDIO_SAMPLE_RATE + extra_samples, dtype=np.float32)
+
+    if extra_samples:
+        with pytest.raises(ValueError, match=r"CoVo audio is 30\.10s; at most 30s is supported"):
+            processor._call_hf_processor("audio", {"audio": [(audio, AUDIO_SAMPLE_RATE)]}, {}, {})
+        extractor.assert_not_called()
+    else:
+        result = processor._call_hf_processor("audio", {"audio": [(audio, AUDIO_SAMPLE_RATE)]}, {}, {})
+        assert result["audio_num_tokens"].tolist() == [188]
+        extractor.assert_called_once()
 
 
 @pytest.mark.cpu
