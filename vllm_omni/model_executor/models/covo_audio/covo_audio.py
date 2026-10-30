@@ -121,7 +121,10 @@ class CovoAudioMultiModalProcessor(OmniMultiModalProcessor[CovoAudioProcessingIn
         for item in audios:
             if isinstance(item, tuple):
                 audio_array, _sr = item
+                if _sr != AUDIO_SAMPLE_RATE:
+                    raise ValueError(f"CoVo processor expects audio resampled to {AUDIO_SAMPLE_RATE} Hz; got {_sr}")
             else:
+                # Raw arrays without sample-rate metadata are already at AUDIO_SAMPLE_RATE.
                 audio_array = item
             raw_audios.append(audio_array)
             # MultiModalDataParser resamples to AUDIO_SAMPLE_RATE.

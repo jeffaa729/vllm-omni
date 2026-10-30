@@ -166,7 +166,7 @@ def test_processor_audio_duration_boundary(extra_samples: int) -> None:
         extractor.assert_not_called()
     else:
         result = processor._call_hf_processor("audio", {"audio": [(audio, AUDIO_SAMPLE_RATE)]}, {}, {})
-        assert result["audio_num_tokens"].tolist() == [188]
+        assert result["audio_num_tokens"].item() == MAX_AUDIO_TOKENS
         extractor.assert_called_once()
 
 
