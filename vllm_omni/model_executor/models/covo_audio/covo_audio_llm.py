@@ -19,7 +19,13 @@ from vllm.v1.worker.encoder_cudagraph_defs import (
     EncoderItemSpec,
 )
 
-from vllm_omni.model_executor.models.covo_audio.covo_audio import MAX_AUDIO_TOKENS
+from vllm_omni.model_executor.models.covo_audio.covo_audio import (
+    AUDIO_CHUNK_LENGTH,
+    AUDIO_FEATURE_SIZE,
+    AUDIO_HOP_LENGTH,
+    AUDIO_SAMPLE_RATE,
+    MAX_AUDIO_TOKENS,
+)
 
 
 class DownsampleLayer(nn.Module):
@@ -152,7 +158,7 @@ class CovoAudioLLMForConditionalGeneration(nn.Module, SupportsPP, SupportsMultiM
         ]
 
     def select_encoder_cudagraph_items(self, mm_kwargs: dict[str, Any], indices: list[int]) -> dict[str, Any]:
-        return {key: value[indices] for key, value in mm_kwargs.items()}
+        return {key: mm_kwargs[key][indices] for key in ("audio_features", "audio_num_tokens") if key in mm_kwargs}
 
     def prepare_encoder_cudagraph_capture_inputs(
         self,
@@ -168,8 +174,13 @@ class CovoAudioLLMForConditionalGeneration(nn.Module, SupportsPP, SupportsMultiM
         if batch_size < 1:
             raise ValueError("CoVo encoder CUDA graph budget must fit at least one audio item")
         encoder_dtype = next(self.encoder.parameters()).dtype
+        num_frames = AUDIO_CHUNK_LENGTH * AUDIO_SAMPLE_RATE // AUDIO_HOP_LENGTH
         return EncoderCudaGraphCaptureInputs(
-            {"audio_features": torch.zeros((batch_size, 128, 3000), device=device, dtype=encoder_dtype)}
+            {
+                "audio_features": torch.zeros(
+                    (batch_size, AUDIO_FEATURE_SIZE, num_frames), device=device, dtype=encoder_dtype
+                )
+            }
         )
 
     def prepare_encoder_cudagraph_replay_buffers(
@@ -205,6 +216,7 @@ class CovoAudioLLMForConditionalGeneration(nn.Module, SupportsPP, SupportsMultiM
         features = outputs["default"]
         for batch_idx, original_idx in enumerate(indices):
             n = int(audio_num_tokens[batch_idx]) if audio_num_tokens is not None else MAX_AUDIO_TOKENS
+            assert n <= MAX_AUDIO_TOKENS, f"CoVo audio token count {n} exceeds {MAX_AUDIO_TOKENS}"
             item = features[batch_idx, :n, :]
             dest[original_idx] = item.clone() if clone else item
 

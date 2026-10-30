@@ -34,6 +34,10 @@ from vllm_omni.model_executor.models.utils import add_prefix_to_loaded_weights
 
 # Max tokens per audio: Whisper 30s → 3000 mel frames → encoder 2x + adapter 8x = 16x → 188
 MAX_AUDIO_TOKENS = 188
+AUDIO_FEATURE_SIZE = 128
+AUDIO_SAMPLE_RATE = 16000
+AUDIO_HOP_LENGTH = 160
+AUDIO_CHUNK_LENGTH = 30
 
 
 def _calc_audio_num_tokens(num_samples: int, sample_rate: int) -> int:
@@ -58,8 +62,10 @@ class CovoAudioProcessingInfo(BaseProcessingInfo):
 
     def get_feature_extractor(self, **kwargs):
         return WhisperFeatureExtractor(
-            feature_size=128,
-            sampling_rate=16000,
+            feature_size=AUDIO_FEATURE_SIZE,
+            sampling_rate=AUDIO_SAMPLE_RATE,
+            hop_length=AUDIO_HOP_LENGTH,
+            chunk_length=AUDIO_CHUNK_LENGTH,
         )
 
     def get_data_parser(self) -> MultiModalDataParser:
