@@ -135,6 +135,8 @@ class CovoAudioLLMForConditionalGeneration(nn.Module, SupportsPP, SupportsMultiM
         for i in range(batch_size):
             if audio_num_tokens is not None:
                 n = int(audio_num_tokens[i])
+                if n > MAX_AUDIO_TOKENS:
+                    raise ValueError(f"CoVo audio token count {n} exceeds {MAX_AUDIO_TOKENS}")
                 result.append(features[i, :n, :])
             else:
                 result.append(features[i])
@@ -216,7 +218,8 @@ class CovoAudioLLMForConditionalGeneration(nn.Module, SupportsPP, SupportsMultiM
         features = outputs["default"]
         for batch_idx, original_idx in enumerate(indices):
             n = int(audio_num_tokens[batch_idx]) if audio_num_tokens is not None else MAX_AUDIO_TOKENS
-            assert n <= MAX_AUDIO_TOKENS, f"CoVo audio token count {n} exceeds {MAX_AUDIO_TOKENS}"
+            if n > MAX_AUDIO_TOKENS:
+                raise ValueError(f"CoVo audio token count {n} exceeds {MAX_AUDIO_TOKENS}")
             item = features[batch_idx, :n, :]
             dest[original_idx] = item.clone() if clone else item
 
