@@ -126,7 +126,10 @@ class CovoAudioMultiModalProcessor(OmniMultiModalProcessor[CovoAudioProcessingIn
             raw_audios.append(audio_array)
             # MultiModalDataParser resamples to target_sr=16000, so always
             # compute token count at 16 kHz regardless of the original sr.
-            num_tokens_list.append(_calc_audio_num_tokens(len(audio_array), 16000))
+            num_tokens = _calc_audio_num_tokens(len(audio_array), 16000)
+            if not 0 <= num_tokens <= MAX_AUDIO_TOKENS:
+                raise ValueError(f"CoVo audio token count {num_tokens} must be between 0 and {MAX_AUDIO_TOKENS}")
+            num_tokens_list.append(num_tokens)
 
         features = feature_extractor(
             raw_audios,

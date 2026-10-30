@@ -12,7 +12,7 @@ from vllm.config.multimodal import MultiModalConfig
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 from tests.helpers.mark import hardware_test
-from vllm_omni.model_executor.models.covo_audio.covo_audio import CovoAudioForConditionalGeneration
+from vllm_omni.model_executor.models.covo_audio.covo_audio import MAX_AUDIO_TOKENS, CovoAudioForConditionalGeneration
 from vllm_omni.model_executor.models.covo_audio.covo_audio_llm import CovoAudioLLMForConditionalGeneration
 from vllm_omni.worker.encoder_cudagraph import SingleReplayEncoderCudaGraphManager
 from vllm_omni.worker.gpu_model_runner import OmniGPUModelRunner
@@ -115,6 +115,27 @@ def test_stage0_eager_audio_embeddings_use_actual_lengths() -> None:
     selected = model.select_encoder_cudagraph_items(inputs, [1])
     assert selected["audio_features"].shape == (1, 128, 3000)
     assert selected["audio_num_tokens"].tolist() == [161]
+
+
+@pytest.mark.cpu
+@pytest.mark.parametrize("num_tokens", [-1, MAX_AUDIO_TOKENS + 1])
+@torch.inference_mode()
+def test_stage0_rejects_invalid_audio_lengths(num_tokens: int) -> None:
+    model = _stage0_model("cpu")
+    inputs = _inputs([num_tokens], "cpu", seed=0)
+    message = f"CoVo audio token count {num_tokens} must be between"
+
+    with pytest.raises(ValueError, match=message):
+        model.embed_multimodal(**inputs)
+
+    with pytest.raises(ValueError, match=message):
+        model.postprocess_encoder_output(
+            outputs={"default": torch.zeros(1, MAX_AUDIO_TOKENS, 6)},
+            indices=[0],
+            per_item_out_tokens=[MAX_AUDIO_TOKENS],
+            dest={},
+            batch_mm_kwargs=inputs,
+        )
 
 
 @pytest.mark.cpu
