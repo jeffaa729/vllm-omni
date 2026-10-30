@@ -147,7 +147,7 @@ def test_stage0_rejects_invalid_audio_lengths(num_tokens: int) -> None:
 
 
 @pytest.mark.cpu
-@pytest.mark.parametrize("extra_samples", [0, AUDIO_SAMPLE_RATE // 10])
+@pytest.mark.parametrize("extra_samples", [0, 1])
 def test_processor_audio_duration_boundary(extra_samples: int) -> None:
     processor = CovoAudioMultiModalProcessor.__new__(CovoAudioMultiModalProcessor)
     processor.info = Mock()
@@ -157,8 +157,12 @@ def test_processor_audio_duration_boundary(extra_samples: int) -> None:
     audio = np.zeros(AUDIO_CHUNK_LENGTH * AUDIO_SAMPLE_RATE + extra_samples, dtype=np.float32)
 
     if extra_samples:
-        with pytest.raises(ValueError, match=r"CoVo audio is 30\.10s; at most 30s is supported"):
+        with pytest.raises(ValueError) as exc_info:
             processor._call_hf_processor("audio", {"audio": [(audio, AUDIO_SAMPLE_RATE)]}, {}, {})
+        assert str(exc_info.value) == (
+            f"CoVo audio is {len(audio) / AUDIO_SAMPLE_RATE:.2f}s ({len(audio)} samples); "
+            f"at most {AUDIO_CHUNK_LENGTH}s is supported"
+        )
         extractor.assert_not_called()
     else:
         result = processor._call_hf_processor("audio", {"audio": [(audio, AUDIO_SAMPLE_RATE)]}, {}, {})
