@@ -76,6 +76,24 @@ def _stage_wrapper(
 
 @pytest.mark.cpu
 @pytest.mark.core_model
+@pytest.mark.parametrize("group_size,token_budget", [(4, 5), (3, 4), (4, 0), (4, -4)])
+def test_stage_wrapper_rejects_invalid_capture_budget(group_size: int, token_budget: int) -> None:
+    child = _protocol_model()
+    child.group_size = group_size
+    model = _stage_wrapper(child)
+
+    with pytest.raises(ValueError, match=rf"token_budget={token_budget}.*positive multiple of group_size={group_size}"):
+        model.prepare_encoder_cudagraph_capture_inputs(
+            token_budget=token_budget,
+            max_batch_size=1,
+            max_frames_per_batch=1,
+            device=torch.device("cpu"),
+            dtype=torch.bfloat16,
+        )
+
+
+@pytest.mark.cpu
+@pytest.mark.core_model
 def test_stage_wrapper_exposes_protocol_and_runner_attaches_manager(monkeypatch: pytest.MonkeyPatch) -> None:
     child = _protocol_model()
     wrapper = _stage_wrapper(child)

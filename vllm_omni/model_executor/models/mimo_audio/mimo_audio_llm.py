@@ -670,7 +670,11 @@ class MiMoAudioLLMForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         path: str = "default",
         axis_keys: tuple[Hashable, ...] | None = None,
     ) -> EncoderCudaGraphCaptureInputs:
-        assert token_budget % self.group_size == 0
+        if token_budget <= 0 or token_budget % self.group_size != 0:
+            raise ValueError(
+                f"MiMo input-local encoder token_budget={token_budget} must be a positive multiple of "
+                f"group_size={self.group_size}."
+            )
         input_embeds = torch.zeros(
             (token_budget // self.group_size, self.group_size, self.input_local_config.hidden_size),
             device=device,
